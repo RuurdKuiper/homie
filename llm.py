@@ -93,8 +93,8 @@ def run_llm(prompt):
     
     data = json.dumps({
         "prompt": formatted_prompt,
-        "n_predict": 64,
-        "temperature": 0.7,
+        "n_predict": config.LLM_MAX_TOKENS,
+        "temperature": config.LLM_TEMPERATURE,
         "stream": True
     }).encode("utf-8")
     

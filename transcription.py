@@ -27,17 +27,22 @@ def ensure_whisper_model():
 
 
 def transcribe_audio(audio_data, whisper_model):
-    """Transcribe audio data using faster-whisper"""
+    """Transcribe audio data using faster-whisper with optimized settings"""
     try:
         # Transcribe using faster-whisper with VAD (Voice Activity Detection)
-        # VAD will filter out silence automatically, making transcription more accurate
+        # Optimized settings for faster transcription:
+        # - condition_on_previous_text=False: Don't use previous context (faster)
+        # - compression_ratio_threshold: Skip clearly non-speech audio
         segments, info = whisper_model.transcribe(
             audio_data.astype(np.float32) / 32768.0,
             language="en", 
             beam_size=1,
             without_timestamps=True,
             best_of=1,
-            vad_filter=True  # Enable built-in VAD for better speech detection
+            vad_filter=True,  # Enable built-in VAD for better speech detection
+            condition_on_previous_text=False,  # Faster: don't condition on previous text
+            compression_ratio_threshold=2.4,  # Skip non-speech audio faster
+            log_prob_threshold=-1.0,  # Skip low-probability segments
         )
         text = "".join([seg.text for seg in segments]).strip()
         return text

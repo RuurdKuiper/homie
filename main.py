@@ -140,11 +140,12 @@ def main():
 
                     listening_array = np.concatenate(listening_audio).astype(np.int16)
 
-                    # Save recording to file for debugging
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    recording_path = os.path.join(config.BASE_DIR, f"recording_{timestamp}.wav")
-                    sf.write(recording_path, listening_array, config.RATE)
-                    print(f"[DEBUG] Recording saved to {recording_path}")
+                    # Save recording to file for debugging (optional, disabled by default for performance)
+                    if config.SAVE_DEBUG_RECORDINGS:
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        recording_path = os.path.join(config.BASE_DIR, f"recording_{timestamp}.wav")
+                        sf.write(recording_path, listening_array, config.RATE)
+                        print(f"[DEBUG] Recording saved to {recording_path}")
 
                     print("[TRANSCRIBING]...")
                     user_text = transcription.transcribe_audio(listening_array, whisper_model)

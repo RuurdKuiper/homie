@@ -3,11 +3,11 @@
 
 import os
 import sys
-import tempfile
-import subprocess
+import io
 import wave
 import numpy as np
 import soundfile as sf
+import sounddevice as sd
 from piper import PiperVoice
 from piper.config import SynthesisConfig
 import config
@@ -26,41 +26,32 @@ PIPER_SYN_CONFIG = SynthesisConfig(
 
 
 def speak(text, silence_ms=2000):
-    """Speak text using Piper TTS with prepended silence."""
+    """Speak text using Piper TTS with prepended silence - optimized for in-memory processing."""
     if not text.strip():
         return
 
-    wav_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            wav_path = tmp.name
-
-        # 1) Synthesize speech to WAV
-        with wave.open(wav_path, "wb") as wav_file:
+        # Use in-memory buffer instead of file I/O for faster processing
+        # 1) Synthesize speech to in-memory WAV buffer
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wav_file:
             piper_voice.synthesize_wav(
                 text,
                 wav_file,
                 syn_config=PIPER_SYN_CONFIG
             )
-
-        # 2) Read audio and prepend silence
-        audio, sr = sf.read(wav_path, dtype="int16")
+        
+        # 2) Read audio from buffer and prepend silence
+        wav_buffer.seek(0)
+        audio, sr = sf.read(wav_buffer, dtype="int16")
         silence = np.zeros(int(sr * silence_ms / 1000), dtype=np.int16)
-        audio = np.concatenate([silence, audio])
-
-        # 3) Write back
-        sf.write(wav_path, audio, sr)
-
-        # 4) Play
-        subprocess.run(["aplay", wav_path], check=False)
+        audio_with_silence = np.concatenate([silence, audio])
+        
+        # 3) Play directly from memory using sounddevice (no file I/O)
+        # Convert to float32 for sounddevice
+        audio_float = audio_with_silence.astype(np.float32) / 32768.0
+        sd.play(audio_float, samplerate=sr, blocking=True)
 
     except Exception as e:
         print(f"[ERROR] Piper TTS failed: {e}", file=sys.stderr)
-
-    finally:
-        try:
-            if wav_path:
-                os.remove(wav_path)
-        except Exception:
-            pass
 

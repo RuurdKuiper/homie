@@ -37,7 +37,9 @@ VOSK_URL = f"https://alphacephei.com/vosk/models/{VOSK_NAME}.zip"
 # =============================
 # Whisper Model (for command transcription)
 # =============================
-WHISPER_MODEL_SIZE = "small"
+WHISPER_MODEL_SIZE = "small"  # Options: "tiny", "base", "small", "medium", "large"
+# Use "tiny" or "base" for faster transcription (lower accuracy)
+# Use "small" for balanced speed/accuracy (default)
 
 # =============================
 # Piper TTS
@@ -56,4 +58,11 @@ LLM_NAME = "Qwen3-1.7B-Q4_K_M.gguf"
 LLM_PATH = os.path.join(MODEL_DIR, LLM_NAME)
 # LLM_URL = "https://huggingface.co/TheBloke/phi-2-GGUF/resolve/main/phi-2.Q4_K_M.gguf"
 # LLM_URL = "https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf"
+
+# =============================
+# Performance Settings
+# =============================
+SAVE_DEBUG_RECORDINGS = False  # Set to True to save audio recordings for debugging (slower)
+LLM_MAX_TOKENS = 48  # Reduced from 64 for faster responses
+LLM_TEMPERATURE = 0.6  # Slightly lower for faster, more deterministic generation
 
