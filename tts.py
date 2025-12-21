@@ -25,10 +25,14 @@ PIPER_SYN_CONFIG = SynthesisConfig(
 )
 
 
-def speak(text, silence_ms=2000):
-    """Speak text using Piper TTS with prepended silence - optimized for in-memory processing."""
+def generate_audio(text, silence_ms=1000):
+    """Generate audio from text using Piper TTS with prepended silence.
+    
+    Returns:
+        tuple: (audio_float, sample_rate) where audio_float is ready for playback
+    """
     if not text.strip():
-        return
+        return None, None
 
     try:
         # Use in-memory buffer instead of file I/O for faster processing
@@ -47,11 +51,32 @@ def speak(text, silence_ms=2000):
         silence = np.zeros(int(sr * silence_ms / 1000), dtype=np.int16)
         audio_with_silence = np.concatenate([silence, audio])
         
-        # 3) Play directly from memory using sounddevice (no file I/O)
-        # Convert to float32 for sounddevice
+        # 3) Convert to float32 for sounddevice
         audio_float = audio_with_silence.astype(np.float32) / 32768.0
-        sd.play(audio_float, samplerate=sr, blocking=True)
+        return audio_float, sr
 
     except Exception as e:
-        print(f"[ERROR] Piper TTS failed: {e}", file=sys.stderr)
+        print(f"[ERROR] Piper TTS generation failed: {e}", file=sys.stderr)
+        return None, None
+
+
+def play_audio(audio_float, sample_rate):
+    """Play audio using sounddevice."""
+    if audio_float is None:
+        return
+    try:
+        sd.play(audio_float, samplerate=sample_rate, blocking=True)
+    except Exception as e:
+        print(f"[ERROR] Audio playback failed: {e}", file=sys.stderr)
+
+
+def speak(text, silence_ms=1000):
+    """Speak text using Piper TTS with prepended silence - optimized for in-memory processing.
+    
+    This is a convenience function that combines generate_audio and play_audio.
+    For separate timing, use generate_audio() and play_audio() directly.
+    """
+    audio_float, sr = generate_audio(text, silence_ms)
+    if audio_float is not None:
+        play_audio(audio_float, sr)
 

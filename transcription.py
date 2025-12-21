@@ -40,7 +40,7 @@ def transcribe_audio(audio_data, whisper_model):
             without_timestamps=True,
             best_of=1,
             vad_filter=True,  # Enable built-in VAD for better speech detection
-            condition_on_previous_text=False,  # Faster: don't condition on previous text
+            condition_on_previous_text=True,  # Faster: don't condition on previous text
             compression_ratio_threshold=2.4,  # Skip non-speech audio faster
             log_prob_threshold=-1.0,  # Skip low-probability segments
         )

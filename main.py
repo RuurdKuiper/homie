@@ -148,19 +148,41 @@ def main():
                         print(f"[DEBUG] Recording saved to {recording_path}")
 
                     print("[TRANSCRIBING]...")
+                    stt_start = time.perf_counter()
                     user_text = transcription.transcribe_audio(listening_array, whisper_model)
+                    stt_time = time.perf_counter() - stt_start
+                    print(f"[TIMING] STT: {stt_time:.2f}s")
 
                     if user_text.strip():
                         print(f"[USER] {user_text}")
                         print(f"[LLM] Processing prompt...")
                         print("[HOMIE] ", end="", flush=True)
+                        llm_start = time.perf_counter()
                         response = llm.run_llm(user_text)
+                        llm_time = time.perf_counter() - llm_start
                         print()
+                        print(f"[TIMING] LLM: {llm_time:.2f}s")
                         
                         # Speak the response
                         if response.strip():
                             print("[SPEAKING]...")
-                            tts.speak(response)
+                            # Time TTS generation separately from playback
+                            tts_gen_start = time.perf_counter()
+                            audio_float, sr = tts.generate_audio(response)
+                            tts_gen_time = time.perf_counter() - tts_gen_start
+                            print(f"[TIMING] TTS Generation: {tts_gen_time:.2f}s")
+                            
+                            if audio_float is not None:
+                                tts_play_start = time.perf_counter()
+                                tts.play_audio(audio_float, sr)
+                                tts_play_time = time.perf_counter() - tts_play_start
+                                print(f"[TIMING] TTS Playback: {tts_play_time:.2f}s")
+                            
+                            tts_total_time = tts_gen_time + tts_play_time
+                            
+                            # Print total response time
+                            total_time = stt_time + llm_time + tts_gen_time
+                            print(f"[TIMING] Total: {total_time:.2f}s (STT: {stt_time:.2f}s + LLM: {llm_time:.2f}s + TTS: {tts_gen_time:.2f}s])")
 
                     audio.flush_audio_queue()
                     wake_recognizer.Reset()

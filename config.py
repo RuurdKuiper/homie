@@ -11,9 +11,9 @@ FRAME_MS = 30
 FRAME_SIZE = int(RATE * FRAME_MS / 1000)  # 480 samples
 RESPEAKER_INDEX = 0  # Index from your logs
 VAD_MODE = 3          # 0 (most sensitive) to 3 (least sensitive)
-SILENCE_TIMEOUT = 1.0 # seconds of silence to stop listening
+SILENCE_TIMEOUT = 1.2 # seconds of silence to stop listening
 MAX_LISTENING_TIME = 20.0 # seconds
-ROLLBACK_BUFFER_SIZE = int(1.5 * RATE / FRAME_SIZE)  # 3 seconds of frames to keep as history
+ROLLBACK_BUFFER_SIZE = int(1.0 * RATE / FRAME_SIZE)  # 3 seconds of frames to keep as history
 SILENCE_RMS_THRESHOLD = 0.4  # start here, tune between 0.01–0.03
 
 # =============================
@@ -37,7 +37,7 @@ VOSK_URL = f"https://alphacephei.com/vosk/models/{VOSK_NAME}.zip"
 # =============================
 # Whisper Model (for command transcription)
 # =============================
-WHISPER_MODEL_SIZE = "small"  # Options: "tiny", "base", "small", "medium", "large"
+WHISPER_MODEL_SIZE = "tiny"  # Options: "tiny", "base", "small", "medium", "large"
 # Use "tiny" or "base" for faster transcription (lower accuracy)
 # Use "small" for balanced speed/accuracy (default)
 
@@ -62,7 +62,7 @@ LLM_PATH = os.path.join(MODEL_DIR, LLM_NAME)
 # =============================
 # Performance Settings
 # =============================
-SAVE_DEBUG_RECORDINGS = False  # Set to True to save audio recordings for debugging (slower)
+SAVE_DEBUG_RECORDINGS = True  # Set to True to save audio recordings for debugging (slower)
 LLM_MAX_TOKENS = 48  # Reduced from 64 for faster responses
 LLM_TEMPERATURE = 0.6  # Slightly lower for faster, more deterministic generation
 
