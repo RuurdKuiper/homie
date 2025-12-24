@@ -2,3 +2,6 @@
 /home
 /models
 /seeed-voicecard
+*.wav
+*.pyc
+__pycache__/config.cpython-313.pyc

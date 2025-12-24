@@ -20,6 +20,7 @@ import transcription
 import llm
 import tts
 import models
+import agent
 
 
 def main():
@@ -158,7 +159,9 @@ def main():
                         print(f"[LLM] Processing prompt...")
                         print("[HOMIE] ", end="", flush=True)
                         llm_start = time.perf_counter()
-                        response = llm.run_llm(user_text)
+
+                        response = agent.handle(user_text)
+
                         llm_time = time.perf_counter() - llm_start
                         print()
                         print(f"[TIMING] LLM: {llm_time:.2f}s")
