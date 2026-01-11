@@ -37,7 +37,7 @@ VOSK_URL = f"https://alphacephei.com/vosk/models/{VOSK_NAME}.zip"
 # =============================
 # Whisper Model (for command transcription)
 # =============================
-WHISPER_MODEL_SIZE = "tiny"  # Options: "tiny", "base", "small", "medium", "large"
+WHISPER_MODEL_SIZE = "base"  # Options: "tiny", "base", "small", "medium", "large"
 # Use "tiny" or "base" for faster transcription (lower accuracy)
 # Use "small" for balanced speed/accuracy (default)
 

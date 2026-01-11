@@ -11,11 +11,11 @@ def route(text: str) -> Intent:
     if any(k in t for k in ["play", "put on", "listen to"]):
         return Intent(type="spotify_play", raw_text=text)
 
+    if any(k in t for k in ["weather", "temperature", "rain"]):
+        return Intent(type="weather", raw_text=text)
+
     if any(k in t for k in ["what day", "what date", "today"]):
         return Intent(type="date")
-
-    if any(k in t for k in ["weather", "temperature", "rain"]):
-        return Intent(type="weather")
 
     if len(t.split()) <= 6:
         return Intent(type="chat_short", raw_text=text)

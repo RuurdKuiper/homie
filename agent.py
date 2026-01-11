@@ -14,7 +14,7 @@ def handle(text: str) -> str:
         return date.handle()
 
     if intent.type == "weather":
-        return weather.handle()
+        return weather.handle_with_text(intent.raw_text if intent.raw_text else "")
 
     if intent.type == "chat_short":
         return chat.short(intent.raw_text)

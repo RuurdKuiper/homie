@@ -21,6 +21,8 @@ import llm
 import tts
 import models
 import agent
+import router
+import acknowledgments
 
 
 def main():
@@ -156,6 +158,20 @@ def main():
 
                     if user_text.strip():
                         print(f"[USER] {user_text}")
+                        
+                        # Route intent to check if acknowledgment is needed
+                        intent = router.route(user_text)
+                        
+                        # Get and speak acknowledgment if needed
+                        ack_message = acknowledgments.get_acknowledgment(intent.type)
+                        if ack_message:
+                            print(f"[ACK] {ack_message}")
+                            # Generate and play acknowledgment immediately
+                            ack_audio, ack_sr = tts.generate_audio(ack_message)
+                            if ack_audio is not None:
+                                tts.play_audio(ack_audio, ack_sr)
+                        
+                        # Process the actual request
                         print(f"[LLM] Processing prompt...")
                         print("[HOMIE] ", end="", flush=True)
                         llm_start = time.perf_counter()
