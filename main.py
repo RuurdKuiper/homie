@@ -162,29 +162,39 @@ def main():
                         # Route intent to check if acknowledgment is needed
                         intent = router.route(user_text)
                         
-                        # Get and speak acknowledgment if needed
+                        # Get and queue acknowledgment if needed (non-blocking)
                         ack_message = acknowledgments.get_acknowledgment(intent.type)
                         if ack_message:
-                            print(f"[ACK] {ack_message}")
-                            # Generate and play acknowledgment immediately
+                            print(f"[HOMIE] {ack_message}")
+                            # Generate and queue acknowledgment (plays in background thread)
                             ack_audio, ack_sr = tts.generate_audio(ack_message)
                             if ack_audio is not None:
-                                tts.play_audio(ack_audio, ack_sr)
+                                tts.queue_audio(ack_audio, ack_sr)
                         
-                        # Process the actual request
-                        print(f"[LLM] Processing prompt...")
-                        print("[HOMIE] ", end="", flush=True)
+                        # Process the actual request (while acknowledgment plays in background)
+                        # Check if this is an LLM-based response (needs streaming output)
+                        needs_llm_streaming = intent.type in ["chat_short", "chat_long"]
+                        
+                        if needs_llm_streaming:
+                            print(f"[LLM] Processing prompt...")
+                            print("[HOMIE] ", end="", flush=True)
+                        else:
+                            print(f"[PROCESSING]...")
+                        
                         llm_start = time.perf_counter()
 
                         response = agent.handle(user_text)
 
                         llm_time = time.perf_counter() - llm_start
-                        print()
-                        print(f"[TIMING] LLM: {llm_time:.2f}s")
                         
-                        # Speak the response
-                        if response.strip():
-                            print("[SPEAKING]...")
+                        if needs_llm_streaming:
+                            print()  # Newline after streaming output
+                        
+                        print(f"[TIMING] Processing: {llm_time:.2f}s")
+                        
+                        # Queue the response (will play after acknowledgment finishes)
+                        if response and response.strip():
+                            print(f"[HOMIE] {response}")
                             # Time TTS generation separately from playback
                             tts_gen_start = time.perf_counter()
                             audio_float, sr = tts.generate_audio(response)
@@ -192,16 +202,12 @@ def main():
                             print(f"[TIMING] TTS Generation: {tts_gen_time:.2f}s")
                             
                             if audio_float is not None:
-                                tts_play_start = time.perf_counter()
-                                tts.play_audio(audio_float, sr)
-                                tts_play_time = time.perf_counter() - tts_play_start
-                                print(f"[TIMING] TTS Playback: {tts_play_time:.2f}s")
+                                # Queue audio (non-blocking - plays after acknowledgment)
+                                tts.queue_audio(audio_float, sr)
                             
-                            tts_total_time = tts_gen_time + tts_play_time
-                            
-                            # Print total response time
+                            # Print total response time (doesn't include playback time)
                             total_time = stt_time + llm_time + tts_gen_time
-                            print(f"[TIMING] Total: {total_time:.2f}s (STT: {stt_time:.2f}s + LLM: {llm_time:.2f}s + TTS: {tts_gen_time:.2f}s])")
+                            print(f"[TIMING] Total: {total_time:.2f}s (STT: {stt_time:.2f}s + LLM: {llm_time:.2f}s + TTS: {tts_gen_time:.2f}s)")
 
                     audio.flush_audio_queue()
                     wake_recognizer.Reset()

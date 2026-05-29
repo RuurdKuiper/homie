@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Text-to-speech using Piper TTS."""
+"""Text-to-speech using Piper TTS with queued audio playback."""
 
 import os
 import sys
 import io
 import wave
+import queue
+import threading
 import numpy as np
 import soundfile as sf
 import sounddevice as sd
@@ -23,6 +25,83 @@ PIPER_SYN_CONFIG = SynthesisConfig(
     noise_w_scale=0.8,
     normalize_audio=True,
 )
+
+# Audio queue and playback thread
+_audio_queue = queue.Queue()
+_playback_thread = None
+_playback_lock = threading.Lock()
+_shutdown_event = threading.Event()
+
+
+def _audio_playback_worker():
+    """Worker thread that plays audio from the queue sequentially."""
+    while not _shutdown_event.is_set():
+        try:
+            # Get audio item from queue (with timeout to check shutdown event)
+            try:
+                audio_item = _audio_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            
+            audio_float, sample_rate = audio_item
+            
+            if audio_float is not None:
+                # Play audio (blocking, but in separate thread)
+                try:
+                    sd.play(audio_float, samplerate=sample_rate, blocking=True)
+                except Exception as e:
+                    print(f"[ERROR] Audio playback failed: {e}", file=sys.stderr)
+            
+            _audio_queue.task_done()
+            
+        except Exception as e:
+            print(f"[ERROR] Audio playback worker error: {e}", file=sys.stderr)
+
+
+def _start_playback_thread():
+    """Start the audio playback thread if not already running."""
+    global _playback_thread
+    with _playback_lock:
+        if _playback_thread is None or not _playback_thread.is_alive():
+            _playback_thread = threading.Thread(target=_audio_playback_worker, daemon=True)
+            _playback_thread.start()
+            print("[TTS] Audio playback thread started")
+
+
+def queue_audio(audio_float, sample_rate):
+    """Queue audio for playback in the background thread.
+    
+    This is non-blocking - audio will be played by the dedicated playback thread.
+    Multiple audio items will be queued and played sequentially.
+    """
+    if audio_float is None:
+        return
+    
+    _start_playback_thread()
+    _audio_queue.put((audio_float, sample_rate))
+
+
+def queue_text(text, silence_ms=1000):
+    """Generate audio from text and queue it for playback.
+    
+    This is non-blocking - returns immediately after queuing.
+    """
+    if not text.strip():
+        return
+    
+    print(f"[HOMIE] {text}")
+    audio_float, sr = generate_audio(text, silence_ms)
+    if audio_float is not None:
+        queue_audio(audio_float, sr)
+
+
+def wait_for_queue_empty(timeout=None):
+    """Wait for all queued audio to finish playing.
+    
+    Args:
+        timeout: Maximum time to wait in seconds (None = wait indefinitely)
+    """
+    _audio_queue.join()  # Wait for all tasks to complete
 
 
 def generate_audio(text, silence_ms=1000):
@@ -61,7 +140,10 @@ def generate_audio(text, silence_ms=1000):
 
 
 def play_audio(audio_float, sample_rate):
-    """Play audio using sounddevice."""
+    """Play audio using sounddevice (blocking, synchronous).
+    
+    For non-blocking playback, use queue_audio() instead.
+    """
     if audio_float is None:
         return
     try:

@@ -56,13 +56,27 @@ LLAMA_SERVER_BIN = os.path.expanduser("~/llama.cpp/build/bin/llama-server")
 # LLM_NAME = "phi-4-mini-instruct.Q4_K_M.gguf"
 LLM_NAME = "Qwen3-1.7B-Q4_K_M.gguf"
 LLM_PATH = os.path.join(MODEL_DIR, LLM_NAME)
+
+# Large model for long answers
+LLM_LONG_NAME = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+LLM_LONG_PATH = os.path.join(MODEL_DIR, LLM_LONG_NAME)
+LLM_LONG_PORT = 8081  # Different port for the large model
+LLM_LONG_PROCESS = None  # Will be set when server starts
+
 # LLM_URL = "https://huggingface.co/TheBloke/phi-2-GGUF/resolve/main/phi-2.Q4_K_M.gguf"
 # LLM_URL = "https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf"
 
 # =============================
+# Weather Configuration
+# =============================
+WEATHER_DEFAULT_LOCATION = "Utrecht,Netherlands"  # Default location for weather queries
+
+# =============================
 # Performance Settings
 # =============================
-SAVE_DEBUG_RECORDINGS = True  # Set to True to save audio recordings for debugging (slower)
-LLM_MAX_TOKENS = 48  # Reduced from 64 for faster responses
+SAVE_DEBUG_RECORDINGS = False  # Set to True to save audio recordings for debugging (slower)
+LLM_MAX_TOKENS = 96  # Reduced from 64 for faster responses
+LLM_LONG_MAX_TOKENS = 256  # More tokens for longer, detailed answers
 LLM_TEMPERATURE = 0.6  # Slightly lower for faster, more deterministic generation
+LLM_LONG_TEMPERATURE = 0.7  # Slightly higher for more creative long answers
 

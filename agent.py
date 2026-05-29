@@ -1,5 +1,5 @@
 from router import route
-from tools import chat, date, weather, spotify
+from tools import chat, date, weather, spotify, long_chat
 
 def handle(text: str) -> str:
     intent = route(text)
@@ -20,6 +20,6 @@ def handle(text: str) -> str:
         return chat.short(intent.raw_text)
 
     if intent.type == "chat_long":
-        return chat.long(intent.raw_text)
+        return long_chat.handle(intent.raw_text if intent.raw_text else "")
 
     return "Sorry, I don’t know how to help with that."
