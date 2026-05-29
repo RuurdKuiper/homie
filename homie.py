@@ -20,20 +20,172 @@ from vosk import Model, KaldiRecognizer
 import soundfile as sf
 import logging
 import webrtcvad
-import pyttsx3
 import re
+from io import BytesIO
 
 from piper import PiperVoice
 from piper.config import SynthesisConfig
 import wave
 
+# Import configuration
+from config import (
+    USE_CLOUD_STT, USE_CLOUD_LLM, USE_CLOUD_TTS,
+    STT_LANGUAGE,
+    OPENAI_API_KEY, OPENAI_STT_MODEL, OPENAI_LLM_MODEL, 
+    OPENAI_TTS_MODEL, OPENAI_TTS_VOICE
+)
+from tools.search import search_web, search_wikipedia
+from tools.spotify import spotify_play
+
+# Import OpenAI client if using cloud services
+if USE_CLOUD_STT or USE_CLOUD_LLM or USE_CLOUD_TTS:
+    from openai import OpenAI
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# =============================
+# Tool Definitions for LLM
+# =============================
+TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_time",
+            "description": "Get the current time",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The location to get weather for (e.g., 'Amsterdam, Netherlands')"
+                    }
+                },
+                "required": ["location"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Set a reminder for a specific time",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "The reminder message"
+                    },
+                    "minutes_from_now": {
+                        "type": "integer",
+                        "description": "How many minutes from now to remind (default: 5)"
+                    }
+                },
+                "required": ["message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "control_device",
+            "description": "Control smart home devices (lights, fans, etc.)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device": {
+                        "type": "string",
+                        "description": "The device name (e.g., 'bedroom light', 'living room fan')"
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["on", "off", "toggle"],
+                        "description": "The action to perform"
+                    }
+                },
+                "required": ["device", "action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_wikipedia",
+            "description": "Search Wikipedia for reliable background knowledge on science, history, art, people, places, and concepts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The topic to look up on Wikipedia"
+                    },
+                    "max_sentences": {
+                        "type": "integer",
+                        "description": "How many summary sentences to return"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for current or recent information such as news, football results, sports standings, release dates, and live updates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The web search query"
+                    },
+                    "num_results": {
+                        "type": "integer",
+                        "description": "How many results to return"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spotify_play",
+            "description": "Play a song, artist, album, or playlist on Spotify.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "track_or_artist": {
+                        "type": "string",
+                        "description": "The song, artist, album, or playlist to play"
+                    },
+                    "context": {
+                        "type": "string",
+                        "enum": ["track", "artist", "album", "playlist"],
+                        "description": "What kind of Spotify item to search for"
+                    }
+                },
+                "required": ["track_or_artist"]
+            }
+        }
+    }
+]
+
 # Suppress sounddevice warnings
 sd.default.latency = 'high'  # Use higher latency to reduce overflow risk
-
-# Initialize text-to-speech engine
-tts_engine = pyttsx3.init()
-tts_engine.setProperty('rate', 150)  # Speed of speech (default is 200)
-tts_engine.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
 
 # =============================
 # Configuration
@@ -68,8 +220,7 @@ PIPER_VOICE_NL = os.path.join(PIPER_DIR, "nl_NL-mls-medium.onnx")
 
 PIPER_VOICE_DEFAULT = PIPER_VOICE_EN
 
-print("[TTS] Loading Piper voice...")
-piper_voice = PiperVoice.load(PIPER_VOICE_DEFAULT)
+piper_voice = None  # Will be initialized after downloading
 
 PIPER_SYN_CONFIG = SynthesisConfig(
     volume=1.0,
@@ -168,28 +319,39 @@ def apply_agc_frame(frame_int16, target_rms=0.08, max_gain=20.0):
 
 
 def transcribe_audio(audio_data, whisper_model):
-    """Transcribe audio data using faster-whisper"""
+    """Transcribe audio data using local Whisper or OpenAI API"""
     try:
-        # Create a temporary WAV file
-        # with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-        #     tmp_path = tmp.name
-        #     sf.write(tmp_path, audio_data, RATE)
-        
-        # Transcribe using faster-whisper with VAD (Voice Activity Detection)
-        # VAD will filter out silence automatically, making transcription more accurate
-        segments, info = whisper_model.transcribe(
-            audio_data.astype(np.float32) / 32768.0,
-            language="en", 
-            beam_size=1,
-            without_timestamps=True,
-            best_of=1,
-            vad_filter=True  # Enable built-in VAD for better speech detection
-        )
-        text = "".join([seg.text for seg in segments]).strip()
-        
-        # Clean up
-        # os.unlink(tmp_path)
-        return text
+        if USE_CLOUD_STT:
+            # Use OpenAI Whisper API
+            print("[STT] Using OpenAI Whisper API...")
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                tmp_path = tmp.name
+                sf.write(tmp_path, audio_data, RATE)
+            
+            try:
+                with open(tmp_path, 'rb') as audio_file:
+                    transcript = openai_client.audio.transcriptions.create(
+                        model=OPENAI_STT_MODEL,
+                        file=audio_file,
+                        language=STT_LANGUAGE
+                    )
+                text = transcript.text.strip()
+                return text
+            finally:
+                os.remove(tmp_path)
+        else:
+            # Use local faster-whisper
+            segments, info = whisper_model.transcribe(
+                audio_data.astype(np.float32) / 32768.0,
+                language=STT_LANGUAGE, 
+                beam_size=1,
+                without_timestamps=True,
+                best_of=1,
+                vad_filter=True
+            )
+            text = "".join([seg.text for seg in segments]).strip()
+            return text
+            
     except Exception as e:
         print(f"[ERROR] Transcription failed: {e}", file=sys.stderr)
         return ""
@@ -209,6 +371,41 @@ def ensure_whisper_model():
         print(f"[ERROR] Failed to load Whisper model: {e}", file=sys.stderr)
         print("[ERROR] Make sure you have an internet connection for the first run.")
         print("[ERROR] Or run: python setup_models.py")
+        return None
+
+# =============================
+# TTS (Piper) Logic
+# =============================
+
+def ensure_piper_model():
+    """Download and load the Piper TTS voice model"""
+    global piper_voice
+    
+    if os.path.isfile(PIPER_VOICE_DEFAULT) and piper_voice is not None:
+        return piper_voice
+    
+    print("[TTS] Ensuring Piper voice model...")
+    os.makedirs(PIPER_DIR, exist_ok=True)
+    
+    # Download from HuggingFace if not present
+    if not os.path.isfile(PIPER_VOICE_DEFAULT):
+        print(f"[TTS] Downloading Piper voice model...")
+        voice_url = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx"
+        try:
+            subprocess.run(["wget", "-c", voice_url, "-O", PIPER_VOICE_DEFAULT], check=True)
+            print("[TTS] Piper voice model downloaded.")
+        except Exception as e:
+            print(f"[ERROR] Failed to download Piper model: {e}", file=sys.stderr)
+            return None
+    
+    # Load the model
+    try:
+        print("[TTS] Loading Piper voice...")
+        piper_voice = PiperVoice.load(PIPER_VOICE_DEFAULT)
+        print("[TTS] Piper voice loaded successfully!")
+        return piper_voice
+    except Exception as e:
+        print(f"[ERROR] Failed to load Piper voice: {e}", file=sys.stderr)
         return None
 
 # =============================
@@ -273,41 +470,123 @@ def format_prompt(prompt):
     return formatted
 
 def speak(text, silence_ms=2000):
-    """Speak text using Piper TTS with prepended silence."""
+    """Speak text using local Piper TTS or OpenAI TTS API"""
     if not text.strip():
         return
 
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            wav_path = tmp.name
-
-        # 1) Synthesize speech to WAV
-        with wave.open(wav_path, "wb") as wav_file:
-            piper_voice.synthesize_wav(
-                text,
-                wav_file,
-                syn_config=PIPER_SYN_CONFIG
+        if USE_CLOUD_TTS:
+            # Use OpenAI TTS API
+            print("[TTS] Using OpenAI TTS API...")
+            response = openai_client.audio.speech.create(
+                model=OPENAI_TTS_MODEL,
+                voice=OPENAI_TTS_VOICE,
+                input=text
             )
+            
+            # Save to temporary file and play
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                tmp_path = tmp.name
+                tmp.write(response.content)
+            
+            time.sleep(0.5)  # Wait for Bluetooth to ready
+            subprocess.run(["ffplay", "-nodisp", "-autoexit", tmp_path], 
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            os.remove(tmp_path)
+        else:
+            # Use local Piper TTS
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                wav_path = tmp.name
 
-        # 2) Read audio and prepend silence
-        audio, sr = sf.read(wav_path, dtype="int16")
-        silence = np.zeros(int(sr * silence_ms / 1000), dtype=np.int16)
-        audio = np.concatenate([silence, audio])
+            # 1) Synthesize speech to WAV
+            with wave.open(wav_path, "wb") as wav_file:
+                piper_voice.synthesize_wav(
+                    text,
+                    wav_file,
+                    syn_config=PIPER_SYN_CONFIG
+                )
 
-        # 3) Write back
-        sf.write(wav_path, audio, sr)
+            # 2) Read audio and prepend silence
+            audio, sr = sf.read(wav_path, dtype="int16")
+            silence = np.zeros(int(sr * silence_ms / 1000), dtype=np.int16)
+            audio = np.concatenate([silence, audio])
 
-        # 4) Play
-        subprocess.run(["aplay", wav_path], check=False)
+            # 3) Write back
+            sf.write(wav_path, audio, sr)
+
+            # 4) Play
+            subprocess.run(["aplay", wav_path], check=False)
+            os.remove(wav_path)
 
     except Exception as e:
-        print(f"[ERROR] Piper TTS failed: {e}", file=sys.stderr)
+        print(f"[ERROR] TTS failed: {e}", file=sys.stderr)
 
     finally:
         try:
-            os.remove(wav_path)
+            if 'wav_path' in locals():
+                os.remove(wav_path)
         except Exception:
             pass
+
+
+# =============================
+# Tool Handler Functions
+# =============================
+
+def get_time():
+    """Get current time"""
+    from datetime import datetime
+    return datetime.now().strftime("%H:%M:%S")
+
+def get_weather(location: str) -> str:
+    """Get weather for a location (stub implementation)"""
+    # In a real implementation, you would call a weather API
+    return f"Weather for {location}: Sunny, 22°C (This is a stub - integrate a weather API)"
+
+def set_reminder(message: str, minutes_from_now: int = 5) -> str:
+    """Set a reminder (stub implementation)"""
+    # In a real implementation, you would schedule this
+    return f"Reminder set: '{message}' in {minutes_from_now} minutes"
+
+def control_device(device: str, action: str) -> str:
+    """Control smart home device (stub implementation)"""
+    # In a real implementation, you would control actual devices
+    return f"Device '{device}' turned {action}"
+
+
+def execute_tool(tool_name: str, tool_input: dict) -> str:
+    """Execute a tool based on its name and input"""
+    if tool_name == "get_time":
+        return get_time()
+    elif tool_name == "get_weather":
+        return get_weather(tool_input.get("location", "current location"))
+    elif tool_name == "search_wikipedia":
+        return search_wikipedia(
+            tool_input.get("query", ""),
+            tool_input.get("max_sentences", 5)
+        )
+    elif tool_name == "search_web":
+        return search_web(
+            tool_input.get("query", ""),
+            tool_input.get("num_results", 3)
+        )
+    elif tool_name == "spotify_play":
+        return spotify_play(
+            tool_input.get("track_or_artist", ""),
+            tool_input.get("context", "track")
+        )
+    elif tool_name == "set_reminder":
+        return set_reminder(
+            tool_input.get("message", ""),
+            tool_input.get("minutes_from_now", 5)
+        )
+    elif tool_name == "control_device":
+        return control_device(
+            tool_input.get("device", ""),
+            tool_input.get("action", "")
+        )
+    else:
+        return f"Unknown tool: {tool_name}"
 
 
 def clean_llm_output(text: str) -> str:
@@ -323,38 +602,93 @@ def clean_llm_output(text: str) -> str:
     return text.strip()
 
 def run_llm(prompt):
-    url = "http://127.0.0.1:8080/completion"
-    formatted_prompt = format_prompt(prompt)
-    
-    data = json.dumps({
-        "prompt": formatted_prompt,
-        "n_predict": 64,
-        "temperature": 0.7,
-        "stream": True
-    }).encode("utf-8")
-    
+    """Run LLM using local llama.cpp or OpenAI API with tool support"""
     try:
-        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req) as response:
-            response_text = ""
-            # llama.cpp streams as Server-Sent Events (SSE) format
-            for line in response:
-                raw_line = line.decode('utf-8').strip()
-                if not raw_line:
-                    continue
-                # Remove "data: " prefix if present
-                if raw_line.startswith("data: "):
-                    raw_line = raw_line[6:]  # Remove "data: "
-                try:
-                    res_json = json.loads(raw_line)
-                    content = res_json.get("content", "")
-                    if content:
-                        print(content, end="", flush=True)
-                        response_text += content
-                except json.JSONDecodeError:
-                    # Skip any non-JSON lines
-                    pass
-            return clean_llm_output(response_text)
+        if USE_CLOUD_LLM:
+            # Use OpenAI API with tool calling
+            print("[LLM] Using OpenAI API with tools...")
+            messages = [
+                {"role": "system", "content": "You are a helpful home assistant. The user often speaks Dutch, but may also speak English. Always respond in the same language as the user's message. Use tools proactively whenever they would improve accuracy or complete the user's request. Use search_wikipedia for durable background knowledge such as science, history, art, people, places, and concepts. Use search_web for contemporary or fast-changing information such as football scores, news, product availability, release dates, and recent events. Use spotify_play whenever the user wants music, a song, an artist, an album, or a playlist. Do not guess when a tool would give a better answer. You may combine tools when needed. Keep your final spoken reply to one sentence."},
+                {"role": "user", "content": prompt}
+            ]
+            
+            # First API call with tools
+            response = openai_client.chat.completions.create(
+                model=OPENAI_LLM_MODEL,
+                messages=messages,
+                tools=TOOLS_SCHEMA,
+                temperature=0.7,
+                max_completion_tokens=96
+            )
+            
+            # Check if the model wants to call tools
+            if response.choices[0].message.tool_calls:
+                # Process tool calls
+                tool_calls = response.choices[0].message.tool_calls
+                response_text = ""
+                
+                for tool_call in tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_input = json.loads(tool_call.function.arguments)
+                    print(f"[TOOL] Calling {tool_name}({tool_input})... ", end="", flush=True)
+                    
+                    # Execute the tool
+                    tool_result = execute_tool(tool_name, tool_input)
+                    print(f"✓")
+                    
+                    # Add assistant message and tool result to conversation
+                    messages.append({"role": "assistant", "content": None, "tool_calls": [tool_call]})
+                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": tool_result})
+                
+                # Second API call with tool results
+                response = openai_client.chat.completions.create(
+                    model=OPENAI_LLM_MODEL,
+                    messages=messages,
+                    temperature=0.7,
+                    max_completion_tokens=96
+                )
+                
+                response_text = response.choices[0].message.content
+                print(response_text, end="", flush=True)
+                return clean_llm_output(response_text)
+            else:
+                # No tool calls, just return the response
+                response_text = response.choices[0].message.content
+                print(response_text, end="", flush=True)
+                return clean_llm_output(response_text)
+        else:
+            # Use local llama.cpp
+            url = "http://127.0.0.1:8080/completion"
+            formatted_prompt = format_prompt(prompt)
+            
+            data = json.dumps({
+                "prompt": formatted_prompt,
+                "n_predict": 64,
+                "temperature": 0.7,
+                "stream": True
+            }).encode("utf-8")
+            
+            req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req) as response:
+                response_text = ""
+                # llama.cpp streams as Server-Sent Events (SSE) format
+                for line in response:
+                    raw_line = line.decode('utf-8').strip()
+                    if not raw_line:
+                        continue
+                    # Remove "data: " prefix if present
+                    if raw_line.startswith("data: "):
+                        raw_line = raw_line[6:]  # Remove "data: "
+                    try:
+                        res_json = json.loads(raw_line)
+                        content = res_json.get("content", "")
+                        if content:
+                            print(content, end="", flush=True)
+                            response_text += content
+                    except json.JSONDecodeError:
+                        # Skip any non-JSON lines
+                        pass
+                return clean_llm_output(response_text)
             
     except Exception as e:
         print(f"(Error: {e})", flush=True)
@@ -369,21 +703,46 @@ def frame_rms(frame_int16):
 # =============================
 def main():
     ensure_vosk()
-    ensure_llm_safe()
+    
+    # Only download/check LLM if using local LLM
+    if not USE_CLOUD_LLM:
+        ensure_llm_safe()
+    
+    # Set Bluetooth speaker as default audio output
+    print("[AUDIO] Setting Bluetooth speaker as default output...")
+    subprocess.run(["pactl", "set-default-sink", "bluez_output.FC_A8_9A_C6_78_14.1"], check=False)
+    time.sleep(0.5)  # Give PulseAudio time to switch
+    
+    # Load Piper TTS model only if using local TTS
+    global piper_voice
+    if not USE_CLOUD_TTS:
+        piper_voice = ensure_piper_model()
+        if not piper_voice:
+            print("[ERROR] Could not load Piper TTS model!")
+            return
+    
+    # Test speaker on startup
+    print("[AUDIO] Testing speaker...")
+    speak("Gooooodmorning!!!")
 
-    if not start_llm_server():
-        print("Could not start LLM server. Check paths!")
-        return
+    # Start LLM server only if using local LLM
+    if not USE_CLOUD_LLM:
+        if not start_llm_server():
+            print("Could not start LLM server. Check paths!")
+            return
 
     print("[INFO] Loading Vosk model for wake word detection...")
     stt_model = Model(VOSK_PATH)
     wake_recognizer = KaldiRecognizer(stt_model, RATE, '["hey homie", "[unk]"]')
     
-    print("[INFO] Loading Whisper model for command transcription...")
-    whisper_model = ensure_whisper_model()
-    if not whisper_model:
-        print("[ERROR] Could not load Whisper model!")
-        return
+    # Load Whisper model only if using local STT
+    whisper_model = None
+    if not USE_CLOUD_STT:
+        print("[INFO] Loading Whisper model for command transcription...")
+        whisper_model = ensure_whisper_model()
+        if not whisper_model:
+            print("[ERROR] Could not load Whisper model!")
+            return
     
     state = "IDLE"
     last_partial = ""

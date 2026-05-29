@@ -1,7 +1,42 @@
-/.venv
-/home
-/models
-/seeed-voicecard
+.venv/
+venv/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.spotify_cache
+
+# Local assets and large runtime data
+models/
+home/
+recording_*.wav
 *.wav
+
+# Python cache and build artifacts
+__pycache__/
 *.pyc
-__pycache__/config.cpython-313.pyc
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+
+# Editor and OS noise
+.DS_Store
+.vscode/
+
+# Local vendor/work directories not meant for git
+seeed-voicecard/
