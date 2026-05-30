@@ -22,6 +22,8 @@ import logging
 import webrtcvad
 import re
 from io import BytesIO
+import shutil
+import signal
 
 from piper import PiperVoice
 from piper.config import SynthesisConfig
@@ -221,6 +223,7 @@ PIPER_VOICE_NL = os.path.join(PIPER_DIR, "nl_NL-mls-medium.onnx")
 PIPER_VOICE_DEFAULT = PIPER_VOICE_EN
 
 piper_voice = None  # Will be initialized after downloading
+selected_output_sink = None
 
 PIPER_SYN_CONFIG = SynthesisConfig(
     volume=1.0,
@@ -248,6 +251,106 @@ def flush_audio_queue():
     global audio_q
     # Create a new queue, discarding all old frames
     audio_q = queue.Queue()
+
+
+def list_audio_sinks():
+    """List available PulseAudio/PipeWire sinks."""
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return []
+
+    sinks = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            sinks.append(parts[1].strip())
+    return sinks
+
+
+def choose_output_sink(sinks):
+    """Prefer wired/USB output, then Bluetooth, then the first available sink."""
+    if not sinks:
+        return None
+
+    def score_sink(sink_name):
+        name = sink_name.lower()
+
+        usb_keywords = [
+            "usb",
+            "dac",
+        ]
+        wired_keywords = [
+            "headphones",
+            "headset",
+            "lineout",
+            "line-out",
+            "speaker",
+            "analog",
+        ]
+        bluetooth_keywords = ["bluez", "bluetooth"]
+
+        if any(keyword in name for keyword in usb_keywords):
+            return (0, sink_name)
+        if any(keyword in name for keyword in wired_keywords) and not any(
+            keyword in name for keyword in bluetooth_keywords
+        ):
+            return (1, sink_name)
+        if any(keyword in name for keyword in bluetooth_keywords):
+            return (2, sink_name)
+        return (3, sink_name)
+
+    return sorted(sinks, key=score_sink)[0]
+
+
+def ensure_output_sink():
+    """Select the best currently-available output sink and make it default."""
+    global selected_output_sink
+
+    sinks = list_audio_sinks()
+    chosen_sink = choose_output_sink(sinks)
+    if not chosen_sink:
+        print("[AUDIO] No PulseAudio/PipeWire sinks found; using system default output.")
+        selected_output_sink = None
+        return None
+
+    if chosen_sink != selected_output_sink:
+        print(f"[AUDIO] Selecting output sink: {chosen_sink}")
+        subprocess.run(["pactl", "set-default-sink", chosen_sink], check=False)
+        time.sleep(0.2)
+        selected_output_sink = chosen_sink
+
+    return selected_output_sink
+
+
+def _play_with_pulseaudio(command):
+    """Run playback command with the chosen Pulse sink if available."""
+    sink = ensure_output_sink()
+    env = os.environ.copy()
+    if sink:
+        env["PULSE_SINK"] = sink
+    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
+
+
+def play_audio_file(path):
+    """Play a local audio file while honoring the selected output sink."""
+    extension = os.path.splitext(path)[1].lower()
+
+    if extension == ".wav" and shutil.which("paplay"):
+        sink = ensure_output_sink()
+        command = ["paplay"]
+        if sink:
+            command.extend(["--device", sink])
+        command.append(path)
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return
+
+    _play_with_pulseaudio(["ffplay", "-nodisp", "-autoexit", path])
 
 # =============================
 # Helpers (Auto-Download Logic)
@@ -444,6 +547,32 @@ def start_llm_server():
     print(" TIMEOUT ❌")
     return False
 
+
+def cleanup_llm_server():
+    """Stop the local LLM server if it is running."""
+    global llm_process
+
+    if not llm_process or llm_process.poll() is not None:
+        return
+
+    try:
+        llm_process.terminate()
+        llm_process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        llm_process.kill()
+        llm_process.wait(timeout=5)
+    except Exception as e:
+        print(f"[WARN] Failed to stop LLM server cleanly: {e}", file=sys.stderr)
+    finally:
+        llm_process = None
+
+
+def handle_shutdown_signal(signum, frame):
+    """Handle process termination from systemd or the shell."""
+    print("\n[EXIT] Shutdown requested.")
+    cleanup_llm_server()
+    raise SystemExit(0)
+
 def get_model_type():
     """Detect model type from LLM_NAME"""
     if "phi" in LLM_NAME.lower():
@@ -475,6 +604,8 @@ def speak(text, silence_ms=2000):
         return
 
     try:
+        ensure_output_sink()
+
         if USE_CLOUD_TTS:
             # Use OpenAI TTS API
             print("[TTS] Using OpenAI TTS API...")
@@ -489,9 +620,8 @@ def speak(text, silence_ms=2000):
                 tmp_path = tmp.name
                 tmp.write(response.content)
             
-            time.sleep(0.5)  # Wait for Bluetooth to ready
-            subprocess.run(["ffplay", "-nodisp", "-autoexit", tmp_path], 
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            time.sleep(0.5)
+            play_audio_file(tmp_path)
             os.remove(tmp_path)
         else:
             # Use local Piper TTS
@@ -515,7 +645,7 @@ def speak(text, silence_ms=2000):
             sf.write(wav_path, audio, sr)
 
             # 4) Play
-            subprocess.run(["aplay", wav_path], check=False)
+            play_audio_file(wav_path)
             os.remove(wav_path)
 
     except Exception as e:
@@ -708,10 +838,8 @@ def main():
     if not USE_CLOUD_LLM:
         ensure_llm_safe()
     
-    # Set Bluetooth speaker as default audio output
-    print("[AUDIO] Setting Bluetooth speaker as default output...")
-    subprocess.run(["pactl", "set-default-sink", "bluez_output.FC_A8_9A_C6_78_14.1"], check=False)
-    time.sleep(0.5)  # Give PulseAudio time to switch
+    # Select output audio sink, preferring wired/USB and falling back to Bluetooth
+    ensure_output_sink()
     
     # Load Piper TTS model only if using local TTS
     global piper_voice
@@ -877,7 +1005,9 @@ def main():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
     try:
         main()
     except KeyboardInterrupt:
+        cleanup_llm_server()
         print("\n[EXIT] Goodbye.")

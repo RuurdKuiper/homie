@@ -1,0 +1,17 @@
+[Unit]
+Description=Homie Voice Assistant
+Wants=network-online.target
+After=network-online.target bluetooth.target pipewire.service pipewire-pulse.service wireplumber.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/homie/projects/homie
+ExecStart=/home/homie/projects/homie/run_homie_service.sh
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

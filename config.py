@@ -21,7 +21,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_STT_MODEL = "gpt-4o-mini-transcribe"  # Latest: gpt-4o-mini-transcribe for cloud STT
 OPENAI_LLM_MODEL = "gpt-5.4-mini"            # Latest: gpt-5.4-mini for fast, efficient cloud LLM
 OPENAI_TTS_MODEL = "gpt-4o-mini-tts"        # Latest: gpt-4o-mini-tts for cloud TTS
-OPENAI_TTS_VOICE = "alloy"                   # Options: alloy, echo, fable, onyx, nova, shimmer
+OPENAI_TTS_VOICE = "echo"                   # Options: alloy, echo, fable, onyx, nova, shimmer
 
 # =============================
 # Audio Configuration
