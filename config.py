@@ -107,8 +107,9 @@ SPOTIFY_CACHE_PATH = os.path.join(BASE_DIR, ".spotify_cache")
 # Performance Settings
 # =============================
 SAVE_DEBUG_RECORDINGS = False  # Set to True to save audio recordings for debugging (slower)
-LLM_MAX_TOKENS = 96  # Reduced from 64 for faster responses
-LLM_LONG_MAX_TOKENS = 256  # More tokens for longer, detailed answers
+LLM_MAX_TOKENS = 768  # Allows long spoken answers and detailed stories
+LLM_LONG_MAX_TOKENS = 1024  # Extra budget for expansive long-form answers
 LLM_TEMPERATURE = 0.6  # Slightly lower for faster, more deterministic generation
 LLM_LONG_TEMPERATURE = 0.7  # Slightly higher for more creative long answers
+CONVERSATION_MEMORY_TURNS = 8  # Number of user/assistant turns to keep for follow-up context
 

@@ -24,6 +24,7 @@ import re
 from io import BytesIO
 import shutil
 import signal
+import threading
 
 from piper import PiperVoice
 from piper.config import SynthesisConfig
@@ -33,6 +34,9 @@ import wave
 from config import (
     USE_CLOUD_STT, USE_CLOUD_LLM, USE_CLOUD_TTS,
     STT_LANGUAGE,
+    SAVE_DEBUG_RECORDINGS,
+    CONVERSATION_MEMORY_TURNS,
+    LLM_MAX_TOKENS,
     OPENAI_API_KEY, OPENAI_STT_MODEL, OPENAI_LLM_MODEL, 
     OPENAI_TTS_MODEL, OPENAI_TTS_VOICE
 )
@@ -224,6 +228,11 @@ PIPER_VOICE_DEFAULT = PIPER_VOICE_EN
 
 piper_voice = None  # Will be initialized after downloading
 selected_output_sink = None
+conversation_history = []
+speech_thread = None
+speech_stop_event = threading.Event()
+playback_process = None
+playback_lock = threading.Lock()
 
 PIPER_SYN_CONFIG = SynthesisConfig(
     volume=1.0,
@@ -328,17 +337,22 @@ def ensure_output_sink():
     return selected_output_sink
 
 
-def _play_with_pulseaudio(command):
-    """Run playback command with the chosen Pulse sink if available."""
+def _spawn_with_pulseaudio(command):
+    """Start playback command with the chosen Pulse sink if available."""
     sink = ensure_output_sink()
     env = os.environ.copy()
     if sink:
         env["PULSE_SINK"] = sink
-    subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, env=env)
+    return subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
 
 
-def play_audio_file(path):
-    """Play a local audio file while honoring the selected output sink."""
+def start_audio_playback(path):
+    """Start local audio playback while honoring the selected output sink."""
     extension = os.path.splitext(path)[1].lower()
 
     if extension == ".wav" and shutil.which("paplay"):
@@ -347,10 +361,198 @@ def play_audio_file(path):
         if sink:
             command.extend(["--device", sink])
         command.append(path)
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return _spawn_with_pulseaudio(["ffplay", "-nodisp", "-autoexit", path])
+
+
+def wait_for_playback(process, stop_event):
+    """Wait for playback to finish, terminating it if interrupted."""
+    global playback_process
+
+    with playback_lock:
+        playback_process = process
+
+    try:
+        while process.poll() is None:
+            if stop_event.is_set():
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                return False
+            time.sleep(0.05)
+        return process.returncode == 0
+    finally:
+        with playback_lock:
+            if playback_process is process:
+                playback_process = None
+
+
+def play_audio_file(path):
+    """Play a local audio file synchronously while honoring the selected output sink."""
+    process = start_audio_playback(path)
+    if process is None:
+        return
+    process.wait()
+
+
+def play_feedback_beep(frequency_hz, duration_ms, volume=0.2):
+    """Play a short synthesized beep for UI feedback."""
+    sample_count = max(1, int(RATE * duration_ms / 1000))
+    time_axis = np.arange(sample_count, dtype=np.float32) / RATE
+    envelope = np.linspace(1.0, 0.0, sample_count, dtype=np.float32)
+    waveform = np.sin(2 * np.pi * frequency_hz * time_axis) * envelope * volume
+    audio = np.clip(waveform * 32767, -32768, 32767).astype(np.int16)
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        beep_path = tmp.name
+
+    try:
+        sf.write(beep_path, audio, RATE)
+        play_audio_file(beep_path)
+    finally:
+        try:
+            os.remove(beep_path)
+        except OSError:
+            pass
+
+
+def split_text_for_tts(text, max_chars=260):
+    """Split long text into smaller TTS chunks to reduce first-audio latency."""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return []
+
+    sentences = re.split(r"(?<=[.!?])\s+", normalized)
+    chunks = []
+    current = ""
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        if len(sentence) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            for start in range(0, len(sentence), max_chars):
+                chunks.append(sentence[start:start + max_chars].strip())
+            continue
+
+        candidate = sentence if not current else f"{current} {sentence}"
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            chunks.append(current)
+            current = sentence
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def is_speaking_active():
+    return speech_thread is not None and speech_thread.is_alive()
+
+
+def stop_speaking():
+    """Stop any active TTS generation or playback."""
+    global speech_thread, playback_process
+
+    speech_stop_event.set()
+
+    with playback_lock:
+        process = playback_process
+    if process and process.poll() is None:
+        process.terminate()
+
+    if speech_thread and speech_thread.is_alive():
+        speech_thread.join(timeout=2)
+
+    with playback_lock:
+        process = playback_process
+        if process and process.poll() is None:
+            process.kill()
+        playback_process = None
+
+    speech_thread = None
+    speech_stop_event.clear()
+
+
+def _build_local_tts_file(text, silence_ms):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+
+    with wave.open(wav_path, "wb") as wav_file:
+        piper_voice.synthesize_wav(
+            text,
+            wav_file,
+            syn_config=PIPER_SYN_CONFIG
+        )
+
+    if silence_ms > 0:
+        audio, sr = sf.read(wav_path, dtype="int16")
+        silence = np.zeros(int(sr * silence_ms / 1000), dtype=np.int16)
+        audio = np.concatenate([silence, audio])
+        sf.write(wav_path, audio, sr)
+
+    return wav_path
+
+
+def _build_cloud_tts_file(text):
+    response = openai_client.audio.speech.create(
+        model=OPENAI_TTS_MODEL,
+        voice=OPENAI_TTS_VOICE,
+        input=text
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp_path = tmp.name
+        tmp.write(response.content)
+
+    return tmp_path
+
+
+def _speak_worker(text, silence_ms):
+    chunks = split_text_for_tts(text)
+    if not chunks:
         return
 
-    _play_with_pulseaudio(["ffplay", "-nodisp", "-autoexit", path])
+    try:
+        for index, chunk in enumerate(chunks):
+            if speech_stop_event.is_set():
+                return
+
+            audio_path = None
+            try:
+                if USE_CLOUD_TTS:
+                    print(f"[TTS] Generating chunk {index + 1}/{len(chunks)} with OpenAI TTS...")
+                    audio_path = _build_cloud_tts_file(chunk)
+                else:
+                    audio_path = _build_local_tts_file(chunk, silence_ms if index == 0 else 0)
+
+                if speech_stop_event.is_set():
+                    return
+
+                process = start_audio_playback(audio_path)
+                if process is None:
+                    return
+                if not wait_for_playback(process, speech_stop_event):
+                    return
+            finally:
+                if audio_path and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                    except OSError:
+                        pass
+    finally:
+        speech_stop_event.clear()
+        global speech_thread
+        speech_thread = None
 
 # =============================
 # Helpers (Auto-Download Logic)
@@ -586,7 +788,7 @@ def format_prompt(prompt):
     """Format prompt based on model type"""
     model_type = get_model_type()
     system_msg = (
-        "You are a home assistant. Respond with only one sentence."
+        "You are a home assistant. Be concise for simple requests, but if the user asks for a detailed or long answer, provide a thorough response and keep track of recent conversation context."
     )
     
     if model_type == "qwen":
@@ -599,64 +801,25 @@ def format_prompt(prompt):
     return formatted
 
 def speak(text, silence_ms=2000):
-    """Speak text using local Piper TTS or OpenAI TTS API"""
+    """Speak text asynchronously so wake-word detection can continue during playback."""
+    global speech_thread
+
     if not text.strip():
         return
 
     try:
         ensure_output_sink()
-
-        if USE_CLOUD_TTS:
-            # Use OpenAI TTS API
-            print("[TTS] Using OpenAI TTS API...")
-            response = openai_client.audio.speech.create(
-                model=OPENAI_TTS_MODEL,
-                voice=OPENAI_TTS_VOICE,
-                input=text
-            )
-            
-            # Save to temporary file and play
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                tmp_path = tmp.name
-                tmp.write(response.content)
-            
-            time.sleep(0.5)
-            play_audio_file(tmp_path)
-            os.remove(tmp_path)
-        else:
-            # Use local Piper TTS
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                wav_path = tmp.name
-
-            # 1) Synthesize speech to WAV
-            with wave.open(wav_path, "wb") as wav_file:
-                piper_voice.synthesize_wav(
-                    text,
-                    wav_file,
-                    syn_config=PIPER_SYN_CONFIG
-                )
-
-            # 2) Read audio and prepend silence
-            audio, sr = sf.read(wav_path, dtype="int16")
-            silence = np.zeros(int(sr * silence_ms / 1000), dtype=np.int16)
-            audio = np.concatenate([silence, audio])
-
-            # 3) Write back
-            sf.write(wav_path, audio, sr)
-
-            # 4) Play
-            play_audio_file(wav_path)
-            os.remove(wav_path)
+        stop_speaking()
+        print("[TTS] Starting interruptible playback...")
+        speech_thread = threading.Thread(
+            target=_speak_worker,
+            args=(text, silence_ms),
+            daemon=True,
+        )
+        speech_thread.start()
 
     except Exception as e:
         print(f"[ERROR] TTS failed: {e}", file=sys.stderr)
-
-    finally:
-        try:
-            if 'wav_path' in locals():
-                os.remove(wav_path)
-        except Exception:
-            pass
 
 
 # =============================
@@ -731,16 +894,49 @@ def clean_llm_output(text: str) -> str:
 
     return text.strip()
 
+
+def build_system_prompt():
+    return (
+        "You are a helpful home assistant. The user often speaks Dutch, but may also speak English. "
+        "Always respond in the same language as the user's message. Use tools proactively whenever they "
+        "would improve accuracy or complete the user's request. Use search_wikipedia for durable background "
+        "knowledge such as science, history, art, people, places, and concepts. Use search_web for "
+        "contemporary or fast-changing information such as football scores, news, product availability, "
+        "release dates, and recent events. Use spotify_play whenever the user wants music, a song, an "
+        "artist, an album, or a playlist. Do not guess when a tool would give a better answer. You may "
+        "combine tools when needed. Be concise for simple requests, but if the user asks for a detailed, "
+        "expansive, story-like, or thorough answer, provide a long structured response. Maintain continuity "
+        "with the recent conversation history when the user refers back to earlier discussion."
+    )
+
+
+def get_conversation_messages():
+    if CONVERSATION_MEMORY_TURNS <= 0:
+        return []
+    return conversation_history[-(CONVERSATION_MEMORY_TURNS * 2):]
+
+
+def remember_turn(user_text: str, assistant_text: str):
+    cleaned_response = clean_llm_output(assistant_text)
+    if not user_text.strip() or not cleaned_response:
+        return
+
+    conversation_history.append({"role": "user", "content": user_text.strip()})
+    conversation_history.append({"role": "assistant", "content": cleaned_response})
+
+    max_messages = max(0, CONVERSATION_MEMORY_TURNS * 2)
+    if max_messages and len(conversation_history) > max_messages:
+        del conversation_history[:-max_messages]
+
 def run_llm(prompt):
     """Run LLM using local llama.cpp or OpenAI API with tool support"""
     try:
         if USE_CLOUD_LLM:
             # Use OpenAI API with tool calling
             print("[LLM] Using OpenAI API with tools...")
-            messages = [
-                {"role": "system", "content": "You are a helpful home assistant. The user often speaks Dutch, but may also speak English. Always respond in the same language as the user's message. Use tools proactively whenever they would improve accuracy or complete the user's request. Use search_wikipedia for durable background knowledge such as science, history, art, people, places, and concepts. Use search_web for contemporary or fast-changing information such as football scores, news, product availability, release dates, and recent events. Use spotify_play whenever the user wants music, a song, an artist, an album, or a playlist. Do not guess when a tool would give a better answer. You may combine tools when needed. Keep your final spoken reply to one sentence."},
-                {"role": "user", "content": prompt}
-            ]
+            messages = [{"role": "system", "content": build_system_prompt()}]
+            messages.extend(get_conversation_messages())
+            messages.append({"role": "user", "content": prompt})
             
             # First API call with tools
             response = openai_client.chat.completions.create(
@@ -748,7 +944,7 @@ def run_llm(prompt):
                 messages=messages,
                 tools=TOOLS_SCHEMA,
                 temperature=0.7,
-                max_completion_tokens=96
+                max_completion_tokens=LLM_MAX_TOKENS
             )
             
             # Check if the model wants to call tools
@@ -775,25 +971,41 @@ def run_llm(prompt):
                     model=OPENAI_LLM_MODEL,
                     messages=messages,
                     temperature=0.7,
-                    max_completion_tokens=96
+                    max_completion_tokens=LLM_MAX_TOKENS
                 )
                 
                 response_text = response.choices[0].message.content
                 print(response_text, end="", flush=True)
-                return clean_llm_output(response_text)
+                cleaned_response = clean_llm_output(response_text)
+                remember_turn(prompt, cleaned_response)
+                return cleaned_response
             else:
                 # No tool calls, just return the response
                 response_text = response.choices[0].message.content
                 print(response_text, end="", flush=True)
-                return clean_llm_output(response_text)
+                cleaned_response = clean_llm_output(response_text)
+                remember_turn(prompt, cleaned_response)
+                return cleaned_response
         else:
             # Use local llama.cpp
             url = "http://127.0.0.1:8080/completion"
-            formatted_prompt = format_prompt(prompt)
+            prompt_with_history = prompt
+            history_messages = get_conversation_messages()
+            if history_messages:
+                history_lines = []
+                for message in history_messages:
+                    role_name = "User" if message["role"] == "user" else "Assistant"
+                    history_lines.append(f"{role_name}: {message['content']}")
+                prompt_with_history = (
+                    "Recent conversation:\n"
+                    + "\n".join(history_lines)
+                    + f"\nUser: {prompt}\nAssistant:"
+                )
+            formatted_prompt = format_prompt(prompt_with_history)
             
             data = json.dumps({
                 "prompt": formatted_prompt,
-                "n_predict": 64,
+                "n_predict": LLM_MAX_TOKENS,
                 "temperature": 0.7,
                 "stream": True
             }).encode("utf-8")
@@ -818,7 +1030,9 @@ def run_llm(prompt):
                     except json.JSONDecodeError:
                         # Skip any non-JSON lines
                         pass
-                return clean_llm_output(response_text)
+                cleaned_response = clean_llm_output(response_text)
+                remember_turn(prompt, cleaned_response)
+                return cleaned_response
             
     except Exception as e:
         print(f"(Error: {e})", flush=True)
@@ -923,10 +1137,17 @@ def main():
                     # Only trigger on final result for "hey homie"
                     if WAKE_WORD in final_text:
                         print(f"\n[WAKE] 👂 Match found!")
+                        interrupted_speaking = is_speaking_active()
+                        if interrupted_speaking:
+                            print("[TTS] Interrupting current playback...")
+                            stop_speaking()
+                            flush_audio_queue()
+                            rollback_buffer = []
                         state = "LISTENING"
+                        play_feedback_beep(880, 120)
 
                         # 🔁 preload rollback audio
-                        listening_audio = [f.copy() for f in rollback_buffer]
+                        listening_audio = [] if interrupted_speaking else [f.copy() for f in rollback_buffer]
                         silence_frames = 0
                         wake_recognizer.Reset()
                         
@@ -972,13 +1193,13 @@ def main():
 
                     # listening_array = np.array(listening_audio, dtype=np.int16)
                     listening_array = np.concatenate(listening_audio).astype(np.int16)
+                    play_feedback_beep(660, 160)
 
-
-                    # Save recording to file for debugging
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    recording_path = os.path.join(BASE_DIR, f"recording_{timestamp}.wav")
-                    sf.write(recording_path, listening_array, RATE)
-                    print(f"[DEBUG] Recording saved to {recording_path}")
+                    if SAVE_DEBUG_RECORDINGS:
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        recording_path = os.path.join(BASE_DIR, f"recording_{timestamp}.wav")
+                        sf.write(recording_path, listening_array, RATE)
+                        print(f"[DEBUG] Recording saved to {recording_path}")
 
                     print("[TRANSCRIBING]...")
                     user_text = transcribe_audio(listening_array, whisper_model)

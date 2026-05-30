@@ -6,6 +6,7 @@ if [[ "${1:-}" == "--follow" ]]; then
 	follow_logs=true
 fi
 
+systemctl --user daemon-reload
 systemctl --user restart homie.service
 systemctl --user --no-pager --full status homie.service
 
