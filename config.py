@@ -35,7 +35,7 @@ VAD_MODE = 3          # 0 (most sensitive) to 3 (least sensitive)
 SILENCE_TIMEOUT = 2.0 # seconds of silence to stop listening
 MAX_LISTENING_TIME = 20.0 # seconds
 ROLLBACK_BUFFER_SIZE = int(1.0 * RATE / FRAME_SIZE)  # 3 seconds of frames to keep as history
-SILENCE_RMS_THRESHOLD = 0.6  # start here, tune between 0.01–0.03
+SILENCE_RMS_THRESHOLD = 0.45  # lower values treat quieter speech as active
 
 # =============================
 # Wake Word Configuration
@@ -69,6 +69,20 @@ PIPER_DIR = os.path.join(MODEL_DIR, "piper")
 PIPER_VOICE_EN = os.path.join(PIPER_DIR, "en_US-amy-medium.onnx")
 PIPER_VOICE_NL = os.path.join(PIPER_DIR, "nl_NL-mls-medium.onnx")
 PIPER_VOICE_DEFAULT = PIPER_VOICE_EN
+PIPER_SPEECH_SPEED = 1.2  # 1.0 = normal speed, >1.0 is faster
+OPENAI_TTS_SPEED = 1.2
+TTS_CHUNK_MAX_CHARS = 420
+TTS_PREFETCH_CHUNKS = 2
+TTS_CACHE_DIR = os.path.join(BASE_DIR, ".tts_cache")
+
+TOOL_SPOKEN_PROMPTS = {
+	"search_wikipedia": "Ik zoek dat even voor je op.",
+	"search_web": "Ik kijk dat meteen online na.",
+	"spotify_play": "Ik zet dat meteen voor je op.",
+	"get_weather": "Ik kijk even naar het weer.",
+	"set_reminder": "Ik regel dat meteen voor je.",
+	"control_device": "Ik doe dat meteen voor je.",
+}
 
 # =============================
 # LLM (llama.cpp)
@@ -102,6 +116,8 @@ SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 SPOTIFY_CACHE_PATH = os.path.join(BASE_DIR, ".spotify_cache")
+SPOTIFY_DEVICE_ID = os.getenv("SPOTIFY_DEVICE_ID", "")
+SPOTIFY_DEVICE_NAME = os.getenv("SPOTIFY_DEVICE_NAME", "")
 
 # =============================
 # Performance Settings

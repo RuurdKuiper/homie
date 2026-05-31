@@ -6,6 +6,7 @@ venv/
 .env.*
 !.env.example
 .spotify_cache
+.tts_cache/
 
 # Local assets and large runtime data
 models/

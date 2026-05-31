@@ -128,7 +128,17 @@ Spotify setup:
 SPOTIFY_CLIENT_ID=your_client_id
 SPOTIFY_CLIENT_SECRET=your_client_secret
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
+SPOTIFY_DEVICE_NAME=Homie
 ```
+
+Spotify playback on the Raspberry Pi uses a local `spotifyd` Spotify Connect device named `Homie`.
+Homie sets the system default sink immediately before Spotify playback, using the same priority order as TTS:
+
+1. USB / wired audio
+2. Bluetooth speaker
+3. Any remaining sink
+
+That means Spotify music should follow the same USB-first, Bluetooth-fallback routing as spoken responses.
 
 ## Run Manually
 
@@ -294,6 +304,44 @@ SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
 The same redirect URI must also be configured in the Spotify developer dashboard.
 
 The first real Spotify use may require one-time OAuth authorization.
+
+### Spotify Connect On The Pi
+
+This project includes a `spotifyd` setup so the Raspberry Pi itself appears in Spotify as a device named `Homie`.
+
+Install and enable it with:
+
+```bash
+cd ~/projects/homie
+mkdir -p ~/.local/bin ~/.config/spotifyd ~/.cache/spotifyd ~/.config/systemd/user
+curl -L https://github.com/Spotifyd/spotifyd/releases/download/v0.4.2/spotifyd-linux-aarch64-default.tar.gz -o /tmp/spotifyd-linux-aarch64-default.tar.gz
+rm -rf /tmp/spotifyd-install
+mkdir -p /tmp/spotifyd-install
+tar -xzf /tmp/spotifyd-linux-aarch64-default.tar.gz -C /tmp/spotifyd-install
+install -m 755 /tmp/spotifyd-install/spotifyd ~/.local/bin/spotifyd
+chmod +x ~/projects/homie/run_spotifyd_service.sh
+cp ~/projects/homie/spotifyd/spotifyd.conf ~/.config/spotifyd/spotifyd.conf
+cp ~/projects/homie/systemd/spotifyd.service ~/.config/systemd/user/spotifyd.service
+systemctl --user daemon-reload
+systemctl --user enable --now spotifyd.service
+```
+
+For one-time account authentication on a headless Pi, run:
+
+```bash
+~/.local/bin/spotifyd authenticate --config-path ~/.config/spotifyd/spotifyd.conf
+```
+
+That command prints a link. Open it in a browser, log into Spotify, approve the device, and wait for the terminal confirmation.
+
+Useful spotifyd commands:
+
+```bash
+systemctl --user status spotifyd.service
+journalctl --user -u spotifyd.service -f
+tail -f ~/projects/homie/spotifyd.log
+systemctl --user restart spotifyd.service
+```
 
 ## Safe Shutdown
 

@@ -25,6 +25,8 @@ from io import BytesIO
 import shutil
 import signal
 import threading
+import hashlib
+from audio_output import choose_output_sink, ensure_output_sink, list_audio_sinks
 
 from piper import PiperVoice
 from piper.config import SynthesisConfig
@@ -37,6 +39,13 @@ from config import (
     SAVE_DEBUG_RECORDINGS,
     CONVERSATION_MEMORY_TURNS,
     LLM_MAX_TOKENS,
+    RATE, FRAME_MS, FRAME_SIZE,
+    RESPEAKER_INDEX, WAKE_WORD,
+    VAD_MODE, SILENCE_TIMEOUT, MAX_LISTENING_TIME,
+    ROLLBACK_BUFFER_SIZE, SILENCE_RMS_THRESHOLD,
+    PIPER_SPEECH_SPEED, OPENAI_TTS_SPEED,
+    TTS_CHUNK_MAX_CHARS, TTS_PREFETCH_CHUNKS,
+    TTS_CACHE_DIR, TOOL_SPOKEN_PROMPTS,
     OPENAI_API_KEY, OPENAI_STT_MODEL, OPENAI_LLM_MODEL, 
     OPENAI_TTS_MODEL, OPENAI_TTS_VOICE
 )
@@ -193,20 +202,6 @@ TOOLS_SCHEMA = [
 # Suppress sounddevice warnings
 sd.default.latency = 'high'  # Use higher latency to reduce overflow risk
 
-# =============================
-# Configuration
-# =============================
-RATE = 16000
-FRAME_MS = 30
-FRAME_SIZE = int(RATE * FRAME_MS / 1000)  # 480 samples
-RESPEAKER_INDEX = 0  # Index from your logs
-WAKE_WORD = "hey homie"
-VAD_MODE = 3          # 0 (most sensitive) to 3 (least sensitive)
-SILENCE_TIMEOUT = 1.0 # seconds of silence to stop listening
-MAX_LISTENING_TIME = 20.0 # seconds
-ROLLBACK_BUFFER_SIZE = int(1.5 * RATE / FRAME_SIZE)  # 3 seconds of frames to keep as history
-SILENCE_RMS_THRESHOLD = 0.4  # start here, tune between 0.01–0.03
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 
@@ -227,16 +222,17 @@ PIPER_VOICE_NL = os.path.join(PIPER_DIR, "nl_NL-mls-medium.onnx")
 PIPER_VOICE_DEFAULT = PIPER_VOICE_EN
 
 piper_voice = None  # Will be initialized after downloading
-selected_output_sink = None
 conversation_history = []
-speech_thread = None
+speech_worker_thread = None
+speech_request_queue = queue.Queue()
 speech_stop_event = threading.Event()
+speech_active_event = threading.Event()
 playback_process = None
 playback_lock = threading.Lock()
 
 PIPER_SYN_CONFIG = SynthesisConfig(
     volume=1.0,
-    length_scale=1.0,
+    length_scale=1.0 / max(PIPER_SPEECH_SPEED, 0.1),
     noise_scale=0.667,
     noise_w_scale=0.8,
     normalize_audio=True,
@@ -260,81 +256,6 @@ def flush_audio_queue():
     global audio_q
     # Create a new queue, discarding all old frames
     audio_q = queue.Queue()
-
-
-def list_audio_sinks():
-    """List available PulseAudio/PipeWire sinks."""
-    try:
-        result = subprocess.run(
-            ["pactl", "list", "short", "sinks"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return []
-
-    sinks = []
-    for line in result.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            sinks.append(parts[1].strip())
-    return sinks
-
-
-def choose_output_sink(sinks):
-    """Prefer wired/USB output, then Bluetooth, then the first available sink."""
-    if not sinks:
-        return None
-
-    def score_sink(sink_name):
-        name = sink_name.lower()
-
-        usb_keywords = [
-            "usb",
-            "dac",
-        ]
-        wired_keywords = [
-            "headphones",
-            "headset",
-            "lineout",
-            "line-out",
-            "speaker",
-            "analog",
-        ]
-        bluetooth_keywords = ["bluez", "bluetooth"]
-
-        if any(keyword in name for keyword in usb_keywords):
-            return (0, sink_name)
-        if any(keyword in name for keyword in wired_keywords) and not any(
-            keyword in name for keyword in bluetooth_keywords
-        ):
-            return (1, sink_name)
-        if any(keyword in name for keyword in bluetooth_keywords):
-            return (2, sink_name)
-        return (3, sink_name)
-
-    return sorted(sinks, key=score_sink)[0]
-
-
-def ensure_output_sink():
-    """Select the best currently-available output sink and make it default."""
-    global selected_output_sink
-
-    sinks = list_audio_sinks()
-    chosen_sink = choose_output_sink(sinks)
-    if not chosen_sink:
-        print("[AUDIO] No PulseAudio/PipeWire sinks found; using system default output.")
-        selected_output_sink = None
-        return None
-
-    if chosen_sink != selected_output_sink:
-        print(f"[AUDIO] Selecting output sink: {chosen_sink}")
-        subprocess.run(["pactl", "set-default-sink", chosen_sink], check=False)
-        time.sleep(0.2)
-        selected_output_sink = chosen_sink
-
-    return selected_output_sink
 
 
 def _spawn_with_pulseaudio(command):
@@ -456,31 +377,31 @@ def split_text_for_tts(text, max_chars=260):
 
 
 def is_speaking_active():
-    return speech_thread is not None and speech_thread.is_alive()
+    return speech_active_event.is_set() or not speech_request_queue.empty()
 
 
 def stop_speaking():
     """Stop any active TTS generation or playback."""
-    global speech_thread, playback_process
+    global playback_process
 
     speech_stop_event.set()
+
+    while True:
+        try:
+            speech_request_queue.get_nowait()
+        except queue.Empty:
+            break
 
     with playback_lock:
         process = playback_process
     if process and process.poll() is None:
         process.terminate()
 
-    if speech_thread and speech_thread.is_alive():
-        speech_thread.join(timeout=2)
-
     with playback_lock:
         process = playback_process
         if process and process.poll() is None:
             process.kill()
         playback_process = None
-
-    speech_thread = None
-    speech_stop_event.clear()
 
 
 def _build_local_tts_file(text, silence_ms):
@@ -504,11 +425,22 @@ def _build_local_tts_file(text, silence_ms):
 
 
 def _build_cloud_tts_file(text):
-    response = openai_client.audio.speech.create(
-        model=OPENAI_TTS_MODEL,
-        voice=OPENAI_TTS_VOICE,
-        input=text
-    )
+    request_kwargs = {
+        "model": OPENAI_TTS_MODEL,
+        "voice": OPENAI_TTS_VOICE,
+        "input": text,
+    }
+    if OPENAI_TTS_SPEED and OPENAI_TTS_SPEED != 1.0:
+        request_kwargs["speed"] = OPENAI_TTS_SPEED
+
+    try:
+        response = openai_client.audio.speech.create(**request_kwargs)
+    except Exception as exc:
+        if "speed" in request_kwargs and "speed" in str(exc).lower():
+            request_kwargs.pop("speed", None)
+            response = openai_client.audio.speech.create(**request_kwargs)
+        else:
+            raise
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
         tmp_path = tmp.name
@@ -517,42 +449,184 @@ def _build_cloud_tts_file(text):
     return tmp_path
 
 
-def _speak_worker(text, silence_ms):
-    chunks = split_text_for_tts(text)
+def get_tool_prompt_text(tool_name):
+    return TOOL_SPOKEN_PROMPTS.get(tool_name, "Ik kijk dat meteen voor je na.")
+
+
+def get_tts_cache_path(cache_key, extension):
+    os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+    backend = f"cloud_{OPENAI_TTS_MODEL}_{OPENAI_TTS_VOICE}_{OPENAI_TTS_SPEED}" if USE_CLOUD_TTS else f"local_piper_{PIPER_SPEECH_SPEED}"
+    hashed = hashlib.sha1(f"{backend}:{cache_key}".encode("utf-8")).hexdigest()[:16]
+    return os.path.join(TTS_CACHE_DIR, f"{cache_key}_{hashed}.{extension}")
+
+
+def ensure_cached_prompt_audio(tool_name):
+    prompt_text = get_tool_prompt_text(tool_name)
+    extension = "mp3" if USE_CLOUD_TTS else "wav"
+    cache_path = get_tts_cache_path(tool_name, extension)
+    if os.path.exists(cache_path):
+        return cache_path
+
+    temp_path = _build_cloud_tts_file(prompt_text) if USE_CLOUD_TTS else _build_local_tts_file(prompt_text, 0)
+    try:
+        shutil.move(temp_path, cache_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    return cache_path
+
+
+def warm_tool_prompt_cache():
+    for tool_name in TOOL_SPOKEN_PROMPTS:
+        if speech_stop_event.is_set():
+            return
+        try:
+            ensure_cached_prompt_audio(tool_name)
+        except Exception as exc:
+            print(f"[WARN] Could not cache prompt for {tool_name}: {exc}")
+
+
+def start_tool_prompt_cache_warmup():
+    threading.Thread(target=warm_tool_prompt_cache, daemon=True).start()
+
+
+def _enqueue_generated_audio(audio_queue, audio_path, stop_event):
+    while not stop_event.is_set():
+        try:
+            audio_queue.put(audio_path, timeout=0.1)
+            return True
+        except queue.Full:
+            continue
+    return False
+
+
+def _process_text_speech(text, silence_ms, stop_event):
+    chunks = split_text_for_tts(text, max_chars=TTS_CHUNK_MAX_CHARS)
     if not chunks:
         return
 
-    try:
-        for index, chunk in enumerate(chunks):
-            if speech_stop_event.is_set():
-                return
+    audio_queue = queue.Queue(maxsize=max(1, TTS_PREFETCH_CHUNKS))
+    producer_done = threading.Event()
+    producer_error = []
+    sentinel = object()
 
-            audio_path = None
-            try:
+    def producer():
+        try:
+            for index, chunk in enumerate(chunks):
+                if stop_event.is_set():
+                    return
+
                 if USE_CLOUD_TTS:
                     print(f"[TTS] Generating chunk {index + 1}/{len(chunks)} with OpenAI TTS...")
                     audio_path = _build_cloud_tts_file(chunk)
                 else:
                     audio_path = _build_local_tts_file(chunk, silence_ms if index == 0 else 0)
 
-                if speech_stop_event.is_set():
+                if not _enqueue_generated_audio(audio_queue, audio_path, stop_event):
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
                     return
+        except Exception as exc:
+            producer_error.append(exc)
+        finally:
+            producer_done.set()
+            while True:
+                try:
+                    audio_queue.put(sentinel, timeout=0.1)
+                    break
+                except queue.Full:
+                    if stop_event.is_set():
+                        break
 
-                process = start_audio_playback(audio_path)
+    producer_thread = threading.Thread(target=producer, daemon=True)
+    producer_thread.start()
+
+    try:
+        while True:
+            if stop_event.is_set() and producer_done.is_set() and audio_queue.empty():
+                break
+            try:
+                item = audio_queue.get(timeout=0.1)
+            except queue.Empty:
+                if producer_done.is_set():
+                    break
+                continue
+
+            if item is sentinel:
+                break
+
+            try:
+                process = start_audio_playback(item)
                 if process is None:
                     return
-                if not wait_for_playback(process, speech_stop_event):
+                if not wait_for_playback(process, stop_event):
                     return
             finally:
-                if audio_path and os.path.exists(audio_path):
+                if os.path.exists(item):
                     try:
-                        os.remove(audio_path)
+                        os.remove(item)
                     except OSError:
                         pass
     finally:
+        producer_thread.join(timeout=1)
+        while True:
+            try:
+                leftover = audio_queue.get_nowait()
+            except queue.Empty:
+                break
+            if leftover is sentinel:
+                continue
+            if os.path.exists(leftover):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+
+    if producer_error:
+        raise producer_error[0]
+
+
+def _process_audio_prompt(path, stop_event):
+    process = start_audio_playback(path)
+    if process is None:
+        return
+    wait_for_playback(process, stop_event)
+
+
+def _speech_queue_worker():
+    while True:
+        job = speech_request_queue.get()
+        if job is None:
+            return
+
         speech_stop_event.clear()
-        global speech_thread
-        speech_thread = None
+        speech_active_event.set()
+        try:
+            if job["kind"] == "audio":
+                _process_audio_prompt(job["path"], speech_stop_event)
+            else:
+                _process_text_speech(job["text"], job.get("silence_ms", 0), speech_stop_event)
+        except Exception as exc:
+            print(f"[ERROR] Speech job failed: {exc}", file=sys.stderr)
+        finally:
+            speech_active_event.clear()
+
+
+def ensure_speech_worker():
+    global speech_worker_thread
+    if speech_worker_thread is None or not speech_worker_thread.is_alive():
+        speech_worker_thread = threading.Thread(target=_speech_queue_worker, daemon=True)
+        speech_worker_thread.start()
+
+
+def enqueue_tool_prompt(tool_name):
+    ensure_speech_worker()
+    try:
+        cache_path = ensure_cached_prompt_audio(tool_name)
+        speech_request_queue.put({"kind": "audio", "path": cache_path})
+    except Exception as exc:
+        print(f"[WARN] Falling back to live TTS for {tool_name}: {exc}")
+        speech_request_queue.put({"kind": "text", "text": get_tool_prompt_text(tool_name), "silence_ms": 0})
 
 # =============================
 # Helpers (Auto-Download Logic)
@@ -801,22 +875,20 @@ def format_prompt(prompt):
     return formatted
 
 def speak(text, silence_ms=2000):
-    """Speak text asynchronously so wake-word detection can continue during playback."""
-    global speech_thread
+    """Queue speech so playback stays serialized while wake-word detection keeps running."""
 
     if not text.strip():
         return
 
     try:
         ensure_output_sink()
-        stop_speaking()
-        print("[TTS] Starting interruptible playback...")
-        speech_thread = threading.Thread(
-            target=_speak_worker,
-            args=(text, silence_ms),
-            daemon=True,
-        )
-        speech_thread.start()
+        ensure_speech_worker()
+        speech_request_queue.put({
+            "kind": "text",
+            "text": text,
+            "silence_ms": silence_ms,
+        })
+        print("[TTS] Queued interruptible playback...")
 
     except Exception as e:
         print(f"[ERROR] TTS failed: {e}", file=sys.stderr)
@@ -889,6 +961,18 @@ def clean_llm_output(text: str) -> str:
     # Remove any remaining angle-bracket tokens like <think>, </think>, <s>, </s>
     text = re.sub(r"</?[^>]+>", "", text)
 
+    # Strip markdown headings, bullets, blockquotes, emphasis and code fences for cleaner spoken output.
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s{0,3}[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s{0,3}\d+\.\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s{0,3}>\s?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"```+|`", "", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.*?) (?<!\*)\*(?!\*)", r"\1", text)
+    text = re.sub(r"(?<!_)_(?!_)(.*?)(?<!_)_(?!_)", r"\1", text)
+    text = text.replace("#", "")
+
     # Normalize whitespace
     text = re.sub(r"\s+", " ", text)
 
@@ -905,8 +989,10 @@ def build_system_prompt():
         "release dates, and recent events. Use spotify_play whenever the user wants music, a song, an "
         "artist, an album, or a playlist. Do not guess when a tool would give a better answer. You may "
         "combine tools when needed. Be concise for simple requests, but if the user asks for a detailed, "
-        "expansive, story-like, or thorough answer, provide a long structured response. Maintain continuity "
-        "with the recent conversation history when the user refers back to earlier discussion."
+        "expansive, story-like, or thorough answer, provide a long natural spoken response. Avoid markdown, "
+        "headings, bullet lists, numbered lists, hashtags, tables, or other written formatting. Write as if "
+        "you are speaking aloud to a person. Maintain continuity with the recent conversation history when "
+        "the user refers back to earlier discussion."
     )
 
 
@@ -957,6 +1043,8 @@ def run_llm(prompt):
                     tool_name = tool_call.function.name
                     tool_input = json.loads(tool_call.function.arguments)
                     print(f"[TOOL] Calling {tool_name}({tool_input})... ", end="", flush=True)
+
+                    enqueue_tool_prompt(tool_name)
                     
                     # Execute the tool
                     tool_result = execute_tool(tool_name, tool_input)
@@ -1047,6 +1135,7 @@ def frame_rms(frame_int16):
 # =============================
 def main():
     ensure_vosk()
+    ensure_speech_worker()
     
     # Only download/check LLM if using local LLM
     if not USE_CLOUD_LLM:
@@ -1062,10 +1151,12 @@ def main():
         if not piper_voice:
             print("[ERROR] Could not load Piper TTS model!")
             return
+
+    start_tool_prompt_cache_warmup()
     
     # Test speaker on startup
     print("[AUDIO] Testing speaker...")
-    speak("Gooooodmorning!!!")
+    speak("Gooooodmorning! I'm ready to assist you. Just call my name to get my attention!")
 
     # Start LLM server only if using local LLM
     if not USE_CLOUD_LLM:

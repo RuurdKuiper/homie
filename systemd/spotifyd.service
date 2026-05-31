@@ -1,0 +1,17 @@
+[Unit]
+Description=Spotify Connect for Homie
+Wants=network-online.target
+After=network-online.target pipewire.service pipewire-pulse.service wireplumber.service bluetooth.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/homie/projects/homie
+ExecStart=/home/homie/projects/homie/run_spotifyd_service.sh
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
