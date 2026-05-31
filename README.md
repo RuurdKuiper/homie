@@ -131,7 +131,7 @@ SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
 SPOTIFY_DEVICE_NAME=Homie
 ```
 
-Spotify playback on the Raspberry Pi uses a local `spotifyd` Spotify Connect device named `Homie`.
+Spotify playback on the Raspberry Pi uses a local Raspotify Spotify Connect device named `Homie`.
 Homie sets the system default sink immediately before Spotify playback, using the same priority order as TTS:
 
 1. USB / wired audio
@@ -307,40 +307,31 @@ The first real Spotify use may require one-time OAuth authorization.
 
 ### Spotify Connect On The Pi
 
-This project includes a `spotifyd` setup so the Raspberry Pi itself appears in Spotify as a device named `Homie`.
+This project includes a Raspotify setup so the Raspberry Pi itself appears in Spotify as a device named `Homie`.
 
 Install and enable it with:
 
 ```bash
 cd ~/projects/homie
-mkdir -p ~/.local/bin ~/.config/spotifyd ~/.cache/spotifyd ~/.config/systemd/user
-curl -L https://github.com/Spotifyd/spotifyd/releases/download/v0.4.2/spotifyd-linux-aarch64-default.tar.gz -o /tmp/spotifyd-linux-aarch64-default.tar.gz
-rm -rf /tmp/spotifyd-install
-mkdir -p /tmp/spotifyd-install
-tar -xzf /tmp/spotifyd-linux-aarch64-default.tar.gz -C /tmp/spotifyd-install
-install -m 755 /tmp/spotifyd-install/spotifyd ~/.local/bin/spotifyd
-chmod +x ~/projects/homie/run_spotifyd_service.sh
-cp ~/projects/homie/spotifyd/spotifyd.conf ~/.config/spotifyd/spotifyd.conf
-cp ~/projects/homie/systemd/spotifyd.service ~/.config/systemd/user/spotifyd.service
+curl -sL https://dtcooper.github.io/raspotify/install.sh | sh
+mkdir -p ~/.config/raspotify ~/.config/systemd/user
+chmod +x ~/projects/homie/run_raspotify_service.sh ~/projects/homie/run_raspotify_event_hook.sh
+cp ~/projects/homie/raspotify/raspotify.conf ~/.config/raspotify/conf
+cp ~/projects/homie/systemd/raspotify-homie.service ~/.config/systemd/user/raspotify-homie.service
+sudo systemctl disable --now raspotify.service
 systemctl --user daemon-reload
-systemctl --user enable --now spotifyd.service
+systemctl --user enable --now raspotify-homie.service
 ```
 
-For one-time account authentication on a headless Pi, run:
+Raspotify uses Spotify Connect discovery, so there is no separate local build step. Once the service is running, the device should appear as `Homie` in Spotify clients on the same network.
+
+Useful Raspotify commands:
 
 ```bash
-~/.local/bin/spotifyd authenticate --config-path ~/.config/spotifyd/spotifyd.conf
-```
-
-That command prints a link. Open it in a browser, log into Spotify, approve the device, and wait for the terminal confirmation.
-
-Useful spotifyd commands:
-
-```bash
-systemctl --user status spotifyd.service
-journalctl --user -u spotifyd.service -f
-tail -f ~/projects/homie/spotifyd.log
-systemctl --user restart spotifyd.service
+systemctl --user status raspotify-homie.service
+journalctl --user -u raspotify-homie.service -f
+tail -f ~/projects/homie/raspotify.log
+systemctl --user restart raspotify-homie.service
 ```
 
 ## Safe Shutdown

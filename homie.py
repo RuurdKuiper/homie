@@ -50,7 +50,7 @@ from config import (
     OPENAI_TTS_MODEL, OPENAI_TTS_VOICE
 )
 from tools.search import search_web, search_wikipedia
-from tools.spotify import spotify_play
+from tools.spotify import spotify_pause, spotify_play
 
 # Import OpenAI client if using cloud services
 if USE_CLOUD_STT or USE_CLOUD_LLM or USE_CLOUD_TTS:
@@ -256,6 +256,34 @@ def flush_audio_queue():
     global audio_q
     # Create a new queue, discarding all old frames
     audio_q = queue.Queue()
+
+
+def resolve_input_device(preferred_index):
+    """Pick a valid capture device, preferring the configured index and Seeed/ReSpeaker names."""
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return preferred_index
+
+    def supports_stereo_input(device):
+        return int(device.get("max_input_channels", 0)) >= 2
+
+    if preferred_index is not None and 0 <= preferred_index < len(devices):
+        preferred_device = devices[preferred_index]
+        if supports_stereo_input(preferred_device):
+            return preferred_index
+
+    preferred_keywords = ("seeed", "respeaker", "2mic", "seeed2micvoicec")
+    for index, device in enumerate(devices):
+        name = str(device.get("name", "")).lower()
+        if supports_stereo_input(device) and any(keyword in name for keyword in preferred_keywords):
+            return index
+
+    for index, device in enumerate(devices):
+        if supports_stereo_input(device):
+            return index
+
+    return preferred_index
 
 
 def _spawn_with_pulseaudio(command):
@@ -1183,11 +1211,12 @@ def main():
     print("--- Available Audio Devices ---")
     print(sd.query_devices())
     print("-------------------------------")
-    print(f"--- STARTING ON DEVICE {RESPEAKER_INDEX} ---")
+    input_device_index = resolve_input_device(RESPEAKER_INDEX)
+    print(f"--- STARTING ON DEVICE {input_device_index} ---")
 
     # Open Audio Stream
     with sd.InputStream(
-        device=RESPEAKER_INDEX,
+        device=input_device_index,
         samplerate=RATE,
         channels=2,        # ReSpeaker requires 2 channels
         dtype="int16",
@@ -1234,6 +1263,8 @@ def main():
                             stop_speaking()
                             flush_audio_queue()
                             rollback_buffer = []
+                        if spotify_pause():
+                            print("[SPOTIFY] Paused current playback...")
                         state = "LISTENING"
                         play_feedback_beep(880, 120)
 

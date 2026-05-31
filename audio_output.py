@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared audio sink selection for Homie and spotifyd."""
+"""Shared audio sink selection for Homie audio playback services."""
 
 from __future__ import annotations
 

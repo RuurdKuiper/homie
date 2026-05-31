@@ -107,6 +107,50 @@ def _ensure_target_device(sp, device):
 	return device_id
 
 
+def spotify_pause() -> bool:
+	"""Pause Spotify playback when it is currently playing on the Homie target device."""
+	sp, error = _get_spotify_client()
+	if error:
+		return False
+
+	try:
+		devices = sp.devices().get("devices", [])
+		device = _pick_device_from_list(devices) if devices else None
+		if not device:
+			return False
+
+		preferred_label = _preferred_device_label()
+		if preferred_label:
+			preferred_matches = [
+				candidate for candidate in devices
+				if candidate.get("id") == getattr(config, "SPOTIFY_DEVICE_ID", "").strip()
+				or _normalized(candidate.get("name", "")) == _normalized(getattr(config, "SPOTIFY_DEVICE_NAME", "").strip())
+				or (
+					getattr(config, "SPOTIFY_DEVICE_NAME", "").strip()
+					and _normalized(getattr(config, "SPOTIFY_DEVICE_NAME", "").strip()) in _normalized(candidate.get("name", ""))
+				)
+			]
+			if not preferred_matches:
+				return False
+			device = preferred_matches[0]
+
+		playback = sp.current_playback()
+		if not playback or not playback.get("is_playing"):
+			return False
+
+		playback_device = playback.get("device") or {}
+		playback_device_id = playback_device.get("id")
+		target_device_id = device.get("id")
+		if playback_device_id and target_device_id and playback_device_id != target_device_id:
+			return False
+
+		sp.pause_playback(device_id=target_device_id)
+		return True
+	except Exception as exc:
+		print(f"[ERROR] Spotify pause failed: {exc}", file=sys.stderr)
+		return False
+
+
 def spotify_play(track_or_artist: str, context: str = "track") -> str:
 	"""Play a track, artist, album, or playlist on Spotify."""
 	query = track_or_artist.strip()
